@@ -16,8 +16,10 @@ from pint import Tsun
 from pint.utils import FTest
 from pint.pint_matrix import (
     DesignMatrixMaker,
+    CovarianceMatrixMaker,
     combine_design_matrices_by_quantity,
     combine_design_matrices_by_param,
+    combine_covariance_matrix,
     )
 
 import pint.residuals as pr
@@ -911,24 +913,24 @@ class WidebandTOAFitter(Fitter): # Is GLSFitter the best here?
     ----------
     model: a pint timing model instance
         The initial timing model for fitting.
-    fit_data_names: list of str
-        The names of the data fit for.
     fit_data: data object or a tuple of data objects.
         The data to fit for. If one data are give, it will assume all the fit
         data set are packed in this one data object. If more than one data
         objects are provided, the size of 'fit_data' has to match the
         'fit_data_names'. In this fitter, the first fit data should be a TOAs object.
+    fit_data_names: list of str
+        The names of the data fit for.
     fitting_method: str
         Algorithm of fitting.
     """
 
-    def __init__(self, model, fit_data_names, fit_data, additional_args={}):
+    def __init__(self, model, fit_data, fit_data_names=['toa', 'dm'],  additional_args={}):
         self.model_init = model
         # Check input data and data_type
         self.fit_data_names = fit_data_names
         # convert the non tuple input to a tuple
-        if not isinstance(fit_data, (tuple)):
-            fit_data = tuple(fit_data)
+        if not isinstance(fit_data, (tuple, list)):
+            fit_data = [fit_data,]
         if not isinstance(fit_data[0], TOAs):
             raise ValueError("The first data set should be a TOAs object.")
         if len(fit_data_names) == 0:
@@ -950,6 +952,13 @@ class WidebandTOAFitter(Fitter): # Is GLSFitter the best here?
 
         # Add noise design matrix maker
         self.noise_designmatrix_maker = DesignMatrixMaker('toa_noise', u.s)
+        #
+        self.covariancematrix_makers = []
+        for data_resids in self.resids.residual_objs:
+            self.covariancematrix_makers.append(CovarianceMatrixMaker(
+                data_resids.residual_type,
+                data_resids.unit)
+                )
 
         self.method = "General_Data_Fitter"
 
@@ -1000,6 +1009,20 @@ class WidebandTOAFitter(Fitter): # Is GLSFitter the best here?
                                                     fit_params,
                                                     offset=True))
         return combine_design_matrices_by_quantity(design_matrixs)
+
+    def make_noise_covariancematrix(self):
+        # TODO This needs to be more general
+        cov_matrixs = []
+        if len(self.fit_data) == 1:
+            for ii, cmatrix_maker in enumerate(self.covariancematrix_makers):
+                cov_matrixs.append(cmatrix_maker(self.fit_data[0],
+                                                    self.model))
+        else:
+            for ii, cmatrix_maker in enumerate(self.covariancematrix_makers):
+                cov_matrixs.append(cmatrix_maker(self.fit_data[ii],
+                                                    self.model))
+
+        return combine_covariance_matrix(cov_matrixs)
 
     def get_data_uncertainty(self, data_name, data_obj):
         """ Get the data uncertainty from the data  object.
@@ -1098,7 +1121,8 @@ class WidebandTOAFitter(Fitter): # Is GLSFitter the best here?
 
         # compute covariance matrices
         if full_cov:
-            cov = self.model.covariance_matrix(self.fit_data[0])
+            cov = self.make_noise_covariancematrix().matrix
+            print(cov.shape, M.shape)
             cf = sl.cho_factor(cov)
             cm = sl.cho_solve(cf, M)
             mtcm = np.dot(M.T, cm)
@@ -1111,7 +1135,7 @@ class WidebandTOAFitter(Fitter): # Is GLSFitter the best here?
             mtcm = np.dot(M.T, cinv[:, None] * M)
             mtcm += np.diag(phiinv)
             mtcy = np.dot(M.T, cinv * residuals)
-        
+
         if maxiter > 0:
             try:
                 c = sl.cho_factor(mtcm)
@@ -1119,13 +1143,13 @@ class WidebandTOAFitter(Fitter): # Is GLSFitter the best here?
                 xvar = sl.cho_solve(c, np.eye(len(mtcy)))
             except sl.LinAlgError:
                 U, s, Vt = sl.svd(mtcm, full_matrices=False)
-       
+
                 if threshold:
                     threshold_val = (
                         np.finfo(np.longdouble).eps * max(M.shape) * s[0]
                     )
                     s[s < threshold_val] = 0.0
-        
+
                 xvar = np.dot(Vt.T / s, Vt)
                 xhat = np.dot(Vt.T, np.dot(U.T, mtcy) / s)
             newres = residuals - np.dot(M, xhat)
@@ -1141,19 +1165,19 @@ class WidebandTOAFitter(Fitter): # Is GLSFitter the best here?
             else:
                 chi2 = np.dot(newres, cinv * newres)
             return chi2
-        
+
         # compute absolute estimates, normalized errors, covariance matrix
         dpars = xhat / norm
         errs = np.sqrt(np.diag(xvar)) / norm
         covmat = (xvar / norm).T / norm
         self.covariance_matrix = covmat
         self.correlation_matrix = (covmat / errs).T / errs
-        
+
         for ii, pn in enumerate(fitp.keys()):
             uind = params.index(pn)  # Index of designmatrix
             # Here we use design matrix's label, so the unit goes to normal.
             # instead of un = 1 / (units[uind])
-            un = units[uind] 
+            un = units[uind]
             if scale_by_F0:
                 un *= u.s
             pv, dpv = fitpv[pn] * fitp[pn].units, dpars[uind] * un
@@ -1163,7 +1187,7 @@ class WidebandTOAFitter(Fitter): # Is GLSFitter the best here?
         self.minimize_func(list(fitpv.values()), *list(fitp.keys()))
         # Update Uncertainties
         self.set_param_uncertainties(fitperrs)
-        
+
         # Compute the noise realizations if possible
         if not full_cov:
             noise_dims = self.model.noise_model_dimensions(self.toas)
