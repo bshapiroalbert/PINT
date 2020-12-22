@@ -13,7 +13,10 @@ from pint.observatory import Observatory
 
 
 def test_simpler_erfa_import():
-    import astropy._erfa as erfa
+    try:
+        import erfa
+    except ImportError:
+        import astropy._erfa as erfa
 
     erfa
 
@@ -148,12 +151,6 @@ def test_IERS_B_agree_with_IERS_Auto():
                 atag, btag
             ),
         )
-
-
-def test_astropy_IERS_B_vs_downloaded():
-    P = IERS_B.open(IERS_B_FILE)
-    B = IERS_B.open(download_file(IERS_B_URL, cache=True))
-    assert B["MJD"][-1] >= P["MJD"][-1]
 
 
 @pytest.mark.xfail(reason="disagreement in current astropy")
